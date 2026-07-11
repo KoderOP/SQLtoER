@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Schema → ER</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Schema&nbsp;→&nbsp;ER</h1>
+    <span class="sub">sql ddl · entity-relationship</span>
+  </div>
+
+  <div class="header-right">
+    <div class="legend" aria-label="Cardinality key">
+      <div class="item">
+        <svg width="52" height="14" viewBox="0 0 52 14"><line x1="4" y1="7" x2="48" y2="7" stroke-width="1.4"/><line x1="10" y1="2" x2="10" y2="12" stroke-width="1.4"/><line x1="42" y1="2" x2="42" y2="12" stroke-width="1.4"/></svg>
+        <span>1 : 1</span>
+      </div>
+      <div class="item">
+        <svg width="52" height="14" viewBox="0 0 52 14"><line x1="4" y1="7" x2="42" y2="7" stroke-width="1.4"/><line x1="10" y1="2" x2="10" y2="12" stroke-width="1.4"/><path d="M42 7 L48 2 M42 7 L48 12 M42 7 L48 7" stroke-width="1.4" fill="none"/></svg>
+        <span>1 : N</span>
+      </div>
+      <div class="item">
+        <svg width="52" height="14" viewBox="0 0 52 14"><line x1="10" y1="7" x2="42" y2="7" stroke-width="1.4"/><path d="M10 7 L4 2 M10 7 L4 12 M10 7 L4 7 M42 7 L48 2 M42 7 L48 12 M42 7 L48 7" stroke-width="1.4" fill="none"/></svg>
+        <span>M : N</span>
+      </div>
+    </div>
+
+    <button id="themeToggle" class="theme-toggle" aria-label="Switch to dark mode" title="Toggle theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <section class="pane input">
+    <div class="pane-bar">
+      <span class="title">SQL script</span>
+      <div class="controls">
+        <select id="sample" title="Load a sample schema">
+          <option value="grading">Sample · grading system</option>
+          <option value="shop">Sample · e-commerce</option>
+          <option value="blog">Sample · blog</option>
+          <option value="blank">Blank</option>
+        </select>
+        <button id="run" class="primary">Generate diagram</button>
+      </div>
+    </div>
+    <div class="editor-wrap">
+      <textarea id="sql" spellcheck="false" placeholder="Paste CREATE TABLE / ALTER TABLE statements here…"></textarea>
+    </div>
+  </section>
+
+  <section class="pane output">
+    <div class="pane-bar">
+      <span class="title">ER diagram</span>
+      <div class="controls">
+        <button id="copyMermaid" class="ghost" disabled>Copy Mermaid</button>
+        <button id="exportSvg" class="ghost" disabled>Export SVG</button>
+      </div>
+    </div>
+    <div class="out-scroll">
+      <div class="canvas" id="canvas">
+        <div class="placeholder">Diagram appears here after you generate it.</div>
+      </div>
+    </div>
+    <div class="src-panel">
+      <div class="src-head" id="srcHead">
+        <span class="title">Mermaid source</span>
+        <span class="title" id="srcToggle">show ▾</span>
+      </div>
+      <div class="src-body" id="srcBody"><pre id="mermaidSrc"></pre></div>
+    </div>
+  </section>
+</main>
+
+<div class="status" id="status">
+  <span class="chip"><span class="dot" style="background:var(--accent)"></span> ready</span>
+  <span>Parses standard <b>CREATE TABLE</b> + <b>ALTER TABLE … ADD FOREIGN KEY</b>. MySQL / PostgreSQL / generic dialects.</span>
+</div>
+
+<script>
+/* ============================================================
+   1. SQL DDL PARSER  —  raw SQL text  ->  intermediate model
+   ============================================================ */
+
+function stripComments(sql){
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')   // block comments
+    .replace(/--[^\n]*/g, ' ')           // -- line comments
+    .replace(/(^|\s)#[^\n]*/g, ' ');     // # line comments (MySQL)
+}
+
+function cleanIdent(raw){
+  if(!raw) return '';
+  raw = raw.trim().replace(/[`"\[\]]/g,'');   // drop `` "" [] quoting
+  const parts = raw.split('.');               // schema.table -> table
+  return parts[parts.length-1];
+}
+
+// return {body, end} for the parenthesised block starting at/after `from`
+function extractParen(str, from){
+  const start = str.indexOf('(', from);
+  if(start < 0) return null;
+  let depth = 0;
+  for(let i=start; i<str.length; i++){
+    if(str[i]==='(') depth++;
+    else if(str[i]===')'){ depth--; if(depth===0) return {body:str.slice(start+1,i), end:i}; }
+  }
+  return null;
+}
+
+// split a body on commas that sit at paren-depth 0
+function splitTopLevel(body){
+  const out=[]; let depth=0, cur='';
+  for(const ch of body){
+    if(ch==='(' ) { depth++; cur+=ch; }
+    else if(ch===')') { depth--; cur+=ch; }
+    else if(ch===',' && depth===0){ if(cur.trim()) out.push(cur.trim()); cur=''; }
+    else cur+=ch;
+  }
+  if(cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+const CONSTRAINT_LEAD = /^(constraint\s+[`"\[]?\w+[`"\]]?\s+)?/i;
+const KEY_IGNORE = /^(key|index|fulltext|spatial|check)\b/i;
+
+function parseColumnDef(def){
+  // name
+  const nm = def.match(/^\s*([`"\[]?\w+[`"\]]?)\s+([\s\S]+)$/);
+  if(!nm) return null;
+  const name = cleanIdent(nm[1]);
+  let rest = nm[2];
+
+  // type token (word + optional (...) )
+  const ty = rest.match(/^([A-Za-z_][\w]*(?:\s*\([^)]*\))?)\s*([\s\S]*)$/);
+  const type = ty ? ty[1].replace(/\s+/g,'') : 'unknown';
+  const mods = (ty ? ty[2] : rest);
+  const U = mods.toUpperCase();
+
+  const col = {
+    name, type,
+    is_pk:  /\bPRIMARY\s+KEY\b/.test(U),
+    unique: /\bUNIQUE\b/.test(U),
+    nullable: !/\bNOT\s+NULL\b/.test(U),
+    ref: null,
+  };
+  // inline REFERENCES target(col)
+  const r = mods.match(/references\s+([`"\[]?[\w.]+[`"\]]?)\s*(?:\(\s*([\w`"\[\]]+)\s*\))?/i);
+  if(r) col.ref = { table: cleanIdent(r[1]), column: cleanIdent(r[2]||'') };
+  return col;
+}
+
+function parseCreateTable(stmt){
+  const head = stmt.match(/create\s+table\s+(?:if\s+not\s+exists\s+)?([`"\[]?[\w.]+[`"\]]?)/i);
+  if(!head) return null;
+  const name = cleanIdent(head[1]);
+  const paren = extractParen(stmt, head.index + head[0].length);
+  if(!paren) return { name, columns:[] };
+
+  const table = { name, columns:[] };
+  const byName = () => Object.fromEntries(table.columns.map(c=>[c.name.toLowerCase(), c]));
+
+  for(let part of splitTopLevel(paren.body)){
+    const stripped = part.replace(CONSTRAINT_LEAD, '');
+    const U = stripped.toUpperCase();
+
+    if(/^PRIMARY\s+KEY/.test(U)){
+      const p = extractParen(stripped, 0);
+      if(p){ const map=byName();
+        splitTopLevel(p.body).forEach(c=>{ const col=map[cleanIdent(c).toLowerCase()]; if(col) col.is_pk=true; }); }
+      continue;
+    }
+    if(/^FOREIGN\s+KEY/.test(U)){
+      const local = extractParen(stripped, 0);
+      const ref = stripped.match(/references\s+([`"\[]?[\w.]+[`"\]]?)\s*(?:\(\s*([\w`"\[\]]+)\s*\))?/i);
+      if(local && ref){ const map=byName();
+        const cols = splitTopLevel(local.body).map(cleanIdent);
+        const c = map[cols[0].toLowerCase()];
+        if(c) c.ref = { table:cleanIdent(ref[1]), column:cleanIdent(ref[2]||'') };
+      }
+      continue;
+    }
+    if(/^UNIQUE/.test(U)){
+      const p = extractParen(stripped, 0);
+      if(p){ const map=byName();
+        splitTopLevel(p.body).forEach(c=>{ const col=map[cleanIdent(c).toLowerCase()]; if(col) col.unique=true; }); }
+      continue;
+    }
+    if(KEY_IGNORE.test(stripped)) continue;   // secondary indexes etc.
+
+    const col = parseColumnDef(part);
+    if(col) table.columns.push(col);
+  }
+  return table;
+}
+
+function parseAlterFk(stmt){
+  const t = stmt.match(/alter\s+table\s+([`"\[]?[\w.]+[`"\]]?)/i);
+  if(!t) return null;
+  const fk = stmt.match(/foreign\s+key\s*\(\s*([\w`"\[\]]+)\s*\)\s*references\s+([`"\[]?[\w.]+[`"\]]?)\s*(?:\(\s*([\w`"\[\]]+)\s*\))?/i);
+  if(!fk) return null;
+  return { table:cleanIdent(t[1]), column:cleanIdent(fk[1]), refTable:cleanIdent(fk[2]), refColumn:cleanIdent(fk[3]||'') };
+}
+
+function parseSQL(sql){
+  const clean = stripComments(sql);
+  const statements = clean.split(';').map(s=>s.trim()).filter(Boolean);
+  const tables = [];
+  const alters = [];
+  for(const s of statements){
+    if(/^create\s+table/i.test(s)){ const t = parseCreateTable(s); if(t) tables.push(t); }
+    else if(/^alter\s+table/i.test(s)){ const a = parseAlterFk(s); if(a) alters.push(a); }
+  }
+  // fold ALTER-added FKs back onto their columns
+  const idx = Object.fromEntries(tables.map(t=>[t.name.toLowerCase(), t]));
+  for(const a of alters){
+    const t = idx[a.table.toLowerCase()];
+    if(!t) continue;
+    const col = t.columns.find(c=>c.name.toLowerCase()===a.column.toLowerCase());
+    if(col) col.ref = { table:a.refTable, column:a.refColumn };
+  }
+  return tables;
+}
+
+/* ============================================================
+   2. RELATIONSHIP + CARDINALITY INFERENCE  (pure logic)
+   ============================================================ */
+
+function inferRelationships(tables){
+  const rels = [];
+  const known = new Set(tables.map(t=>t.name.toLowerCase()));
+  const warnings = [];
+
+  for(const t of tables){
+    const fks = t.columns.filter(c=>c.ref);
+    const pks = t.columns.filter(c=>c.is_pk);
+
+    // junction table -> many-to-many
+    const isJunction = fks.length===2 && pks.length===2 && pks.every(c=>c.ref);
+    if(isJunction){
+      rels.push({ from:fks[0].ref.table, to:fks[1].ref.table, card:'M:N', via:t.name, label:t.name });
+      continue;
+    }
+    for(const c of fks){
+      if(!known.has(c.ref.table.toLowerCase()))
+        warnings.push(`"${t.name}.${c.name}" references undefined table "${c.ref.table}"`);
+      const oneToOne = c.unique || (c.is_pk && pks.length===1);
+      rels.push({ from:c.ref.table, to:t.name, card: oneToOne ? '1:1' : '1:N', label:c.name });
+    }
+  }
+  return { rels, warnings };
+}
+
+/* ============================================================
+   3. RENDER  ->  Mermaid erDiagram text
+   ============================================================ */
+
+const CARD = { '1:1':'||--||', '1:N':'||--o{', 'M:N':'}o--o{' };
+const safe   = s => (s||'x').replace(/\W+/g,'_').replace(/^_+|_+$/g,'') || 'x';
+const safeTy = s => (s||'type').replace(/[()\s,]+/g,'_').replace(/^_+|_+$/g,'') || 'type';
+
+function toMermaid(tables, rels){
+  const lines = ['erDiagram'];
+  for(const r of rels){
+    lines.push(`  ${safe(r.from)} ${CARD[r.card]} ${safe(r.to)} : ${safe(r.label)}`);
+  }
+  for(const t of tables){
+    lines.push(`  ${safe(t.name)} {`);
+    if(t.columns.length===0) lines.push('    string _ "empty"');
+    for(const c of t.columns){
+      const keys = [];
+      if(c.is_pk) keys.push('PK');
+      if(c.ref)   keys.push('FK');
+      if(c.unique && !c.is_pk && !c.ref) keys.push('UK');
+      lines.push(`    ${safeTy(c.type)} ${safe(c.name)}${keys.length?' '+keys.join(','):''}`);
+    }
+    lines.push('  }');
+  }
+  return lines.join('\n');
+}
+
+/* ============================================================
+   4. THEME  (light / dark, incl. the diagram itself)
+   ============================================================ */
+
+const MERMAID_THEME = {
+  light:{
+    fontFamily:'IBM Plex Mono, monospace',
+    primaryColor:'#ffffff', primaryBorderColor:'#4E43E0',
+    lineColor:'#8A93A6', primaryTextColor:'#172231',
+    attributeBackgroundColorOdd:'#ffffff', attributeBackgroundColorEven:'#F7F8FA',
+  },
+  dark:{
+    fontFamily:'IBM Plex Mono, monospace',
+    primaryColor:'#1B2531', primaryBorderColor:'#7B72FF',
+    lineColor:'#6B7A8D', primaryTextColor:'#E4E9EF',
+    attributeBackgroundColorOdd:'#161E27', attributeBackgroundColorEven:'#1B2531',
+  },
+};
+
+function initMermaid(mode){
+  mermaid.initialize({
+    startOnLoad:false, securityLevel:'loose', theme:'base',
+    themeVariables: MERMAID_THEME[mode],
+    er:{ useMaxWidth:true, entityPadding:14 },
+  });
+}
+
+function storedTheme(){
+  try{ return localStorage.getItem('schema-er-theme'); }catch{ return null; }
+}
+function persistTheme(mode){
+  try{ localStorage.setItem('schema-er-theme', mode); }catch{}
+}
+
+function applyTheme(mode, rerender=true){
+  document.documentElement.setAttribute('data-theme', mode);
+  $('themeToggle').setAttribute('aria-label', mode==='dark' ? 'Switch to light mode' : 'Switch to dark mode');
+  initMermaid(mode);
+  if(rerender && lastMermaid) generate();
+}
+
+/* ============================================================
+   5. UI WIRING
+   ============================================================ */
+
+const $ = id => document.getElementById(id);
+let renderCount = 0, lastSvg = '', lastMermaid = '';
+
+async function generate(){
+  const sql = $('sql').value;
+  const tables = parseSQL(sql);
+  const { rels, warnings } = inferRelationships(tables);
+
+  if(tables.length===0){
+    setStatus({ err:'No CREATE TABLE statements found. Check your SQL.' });
+    $('canvas').innerHTML = '<div class="placeholder">Nothing to draw yet.</div>';
+    $('copyMermaid').disabled = $('exportSvg').disabled = true;
+    lastMermaid = '';
+    return;
+  }
+
+  const code = toMermaid(tables, rels);
+  lastMermaid = code;
+  $('mermaidSrc').textContent = code;
+
+  try{
+    const { svg } = await mermaid.render('er_'+(++renderCount), code);
+    $('canvas').innerHTML = svg;
+    lastSvg = svg;
+    $('copyMermaid').disabled = $('exportSvg').disabled = false;
+    setStatus({ tables:tables.length, rels:rels.length, warnings });
+  }catch(e){
+    $('canvas').innerHTML = '<div class="placeholder">Render error — see Mermaid source below.</div>';
+    setStatus({ err:'Mermaid could not render this schema. '+(e && e.message ? e.message : '') });
+    $('srcBody').classList.add('open'); $('srcToggle').textContent='hide ▴';
+  }
+}
+
+function setStatus({tables, rels, warnings=[], err}={}){
+  const box = $('status');
+  if(err){ box.innerHTML = `<span class="chip"><span class="dot" style="background:var(--err)"></span> error</span><span class="err">${err}</span>`; return; }
+  let html = `<span class="chip"><span class="dot" style="background:var(--mn)"></span> done</span>`
+    + `<span><b>${tables}</b> tables · <b>${rels}</b> relationships</span>`;
+  if(warnings.length){
+    html += `<span class="warn">${warnings.length} warning${warnings.length>1?'s':''}: ${warnings.slice(0,2).join('; ')}${warnings.length>2?' …':''}</span>`;
+  }
+  box.innerHTML = html;
+}
+
+/* samples */
+const SAMPLES = {
+grading: `-- School AI-grading system
+CREATE TABLE schools (
+  id         INT PRIMARY KEY,
+  name       VARCHAR(120) NOT NULL,
+  city       VARCHAR(80)
+);
+
+CREATE TABLE grades (
+  id         INT PRIMARY KEY,
+  school_id  INT NOT NULL REFERENCES schools(id),
+  name       VARCHAR(20) NOT NULL
+);
+
+CREATE TABLE sections (
+  id         INT PRIMARY KEY,
+  grade_id   INT NOT NULL REFERENCES grades(id),
+  label      CHAR(1) NOT NULL
+);
+
+CREATE TABLE teachers (
+  id         INT PRIMARY KEY,
+  school_id  INT NOT NULL REFERENCES schools(id),
+  full_name  VARCHAR(120) NOT NULL,
+  email      VARCHAR(120) UNIQUE
+);
+
+CREATE TABLE students (
+  id         INT PRIMARY KEY,
+  section_id INT NOT NULL REFERENCES sections(id),
+  roll_no    VARCHAR(20) NOT NULL,
+  full_name  VARCHAR(120) NOT NULL
+);
+
+CREATE TABLE subjects (
+  id         INT PRIMARY KEY,
+  name       VARCHAR(80) NOT NULL
+);
+
+-- many-to-many: teacher <-> subject
+CREATE TABLE teacher_subjects (
+  teacher_id INT NOT NULL,
+  subject_id INT NOT NULL,
+  PRIMARY KEY (teacher_id, subject_id),
+  FOREIGN KEY (teacher_id) REFERENCES teachers(id),
+  FOREIGN KEY (subject_id) REFERENCES subjects(id)
+);
+
+CREATE TABLE exams (
+  id         INT PRIMARY KEY,
+  subject_id INT NOT NULL REFERENCES subjects(id),
+  section_id INT NOT NULL REFERENCES sections(id),
+  title      VARCHAR(120) NOT NULL,
+  max_marks  INT NOT NULL,
+  exam_date  DATE
+);
+
+CREATE TABLE answer_sheets (
+  id         INT PRIMARY KEY,
+  exam_id    INT NOT NULL REFERENCES exams(id),
+  student_id INT NOT NULL REFERENCES students(id),
+  scan_url   VARCHAR(255),
+  status     VARCHAR(20) DEFAULT 'pending'
+);
+
+-- 1:1 — one score row per answer sheet (UNIQUE FK)
+CREATE TABLE scores (
+  id              INT PRIMARY KEY,
+  answer_sheet_id INT NOT NULL UNIQUE REFERENCES answer_sheets(id),
+  ai_marks        DECIMAL(6,2),
+  final_marks     DECIMAL(6,2),
+  reviewed_by     INT REFERENCES teachers(id),
+  reviewed_at     TIMESTAMP
+);`,
+
+shop: `CREATE TABLE customers (
+  id     INT PRIMARY KEY,
+  email  VARCHAR(120) UNIQUE NOT NULL,
+  name   VARCHAR(120)
+);
+
+CREATE TABLE products (
+  id     INT PRIMARY KEY,
+  sku    VARCHAR(40) UNIQUE,
+  name   VARCHAR(160) NOT NULL,
+  price  DECIMAL(10,2) NOT NULL
+);
+
+CREATE TABLE orders (
+  id           INT PRIMARY KEY,
+  customer_id  INT NOT NULL REFERENCES customers(id),
+  placed_at    TIMESTAMP,
+  total        DECIMAL(10,2)
+);
+
+-- junction with payload -> many-to-many
+CREATE TABLE order_items (
+  order_id    INT NOT NULL,
+  product_id  INT NOT NULL,
+  qty         INT NOT NULL,
+  PRIMARY KEY (order_id, product_id),
+  FOREIGN KEY (order_id)   REFERENCES orders(id),
+  FOREIGN KEY (product_id) REFERENCES products(id)
+);
+
+CREATE TABLE shipments (
+  id        INT PRIMARY KEY,
+  order_id  INT NOT NULL UNIQUE REFERENCES orders(id),
+  carrier   VARCHAR(60),
+  tracking  VARCHAR(80)
+);`,
+
+blog: `CREATE TABLE authors (
+  id    INT PRIMARY KEY,
+  handle VARCHAR(40) UNIQUE NOT NULL,
+  name  VARCHAR(120)
+);
+
+CREATE TABLE posts (
+  id         INT PRIMARY KEY,
+  author_id  INT NOT NULL REFERENCES authors(id),
+  title      VARCHAR(200) NOT NULL,
+  body       TEXT,
+  published  BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE comments (
+  id       INT PRIMARY KEY,
+  post_id  INT NOT NULL REFERENCES posts(id),
+  author_id INT REFERENCES authors(id),
+  body     TEXT NOT NULL
+);
+
+CREATE TABLE tags (
+  id   INT PRIMARY KEY,
+  name VARCHAR(40) UNIQUE NOT NULL
+);
+
+CREATE TABLE post_tags (
+  post_id INT NOT NULL,
+  tag_id  INT NOT NULL,
+  PRIMARY KEY (post_id, tag_id),
+  FOREIGN KEY (post_id) REFERENCES posts(id),
+  FOREIGN KEY (tag_id)  REFERENCES tags(id)
+);`,
+
+blank: ``,
+};
+
+/* events */
+$('run').addEventListener('click', generate);
+$('sample').addEventListener('change', e=>{
+  $('sql').value = SAMPLES[e.target.value] ?? '';
+  if(e.target.value!=='blank') generate();
+});
+$('sql').addEventListener('keydown', e=>{
+  if((e.metaKey||e.ctrlKey) && e.key==='Enter'){ e.preventDefault(); generate(); }
+});
+$('srcHead').addEventListener('click', ()=>{
+  const b=$('srcBody'); const open=b.classList.toggle('open');
+  $('srcToggle').textContent = open ? 'hide ▴' : 'show ▾';
+});
+$('copyMermaid').addEventListener('click', async ()=>{
+  try{ await navigator.clipboard.writeText(lastMermaid);
+    $('copyMermaid').textContent='Copied'; setTimeout(()=>$('copyMermaid').textContent='Copy Mermaid',1200);
+  }catch{}
+});
+$('exportSvg').addEventListener('click', ()=>{
+  if(!lastSvg) return;
+  const blob = new Blob([lastSvg], {type:'image/svg+xml'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url; a.download='er-diagram.svg'; a.click();
+  URL.revokeObjectURL(url);
+});
+$('themeToggle').addEventListener('click', ()=>{
+  const next = document.documentElement.getAttribute('data-theme')==='dark' ? 'light' : 'dark';
+  persistTheme(next);
+  applyTheme(next);
+});
+
+/* boot: choose theme (saved > system > light), then draw */
+const initialTheme = storedTheme()
+  || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+applyTheme(initialTheme, false);   // sets attribute + mermaid theme, no render yet
+$('sql').value = SAMPLES.grading;
+window.addEventListener('load', generate);
+</script>
+</body>
+</html>
