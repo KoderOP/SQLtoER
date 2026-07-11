@@ -150,19 +150,39 @@ textarea#sql::placeholder{color:var(--code-ph)}
 
 /* ---- output ---- */
 .out-scroll{
-  flex:1; overflow:auto; min-height:0;
+  flex:1; position:relative; overflow:hidden; min-height:0;
+  cursor:grab; touch-action:none; user-select:none;
   background:
     linear-gradient(var(--edge) 1px,transparent 1px) 0 0/22px 22px,
     linear-gradient(90deg,var(--edge) 1px,transparent 1px) 0 0/22px 22px,
     var(--panel);
   transition:background-color .2s ease;
 }
-.canvas{padding:26px; min-height:100%; display:flex; align-items:flex-start; justify-content:center}
-.canvas svg{max-width:100%; height:auto}
+.out-scroll.grabbing{cursor:grabbing}
+.canvas{position:relative; width:100%; height:100%}
+.canvas svg{position:absolute; top:0; left:0; max-width:none; transform-origin:0 0}
 .placeholder{
-  margin:auto; text-align:center; color:var(--muted);
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  text-align:center; color:var(--muted);
   font-family:'IBM Plex Mono',monospace; font-size:12px; letter-spacing:.03em;
 }
+
+/* zoom / pan controls */
+.zoom-controls{
+  position:absolute; right:14px; bottom:14px; z-index:5;
+  display:flex; align-items:center; gap:4px; padding:5px;
+  background:var(--panel); border:1px solid var(--edge); border-radius:10px;
+  box-shadow:0 3px 12px rgba(0,0,0,.14); cursor:default;
+}
+.zoom-controls button{
+  width:30px; height:30px; padding:0; font-size:16px; line-height:1;
+  display:flex; align-items:center; justify-content:center; border-radius:7px;
+}
+.zoom-controls #zoomLabel{
+  min-width:46px; text-align:center; font-family:'IBM Plex Mono',monospace;
+  font-size:11px; color:var(--muted); user-select:none;
+}
+.zoom-controls[hidden]{display:none}
 
 .src-panel{border-top:1px solid var(--edge); background:var(--panel); transition:background-color .2s ease}
 .src-head{
@@ -263,9 +283,15 @@ pre#mermaidSrc{
         <button id="exportSvg" class="ghost" disabled>Export SVG</button>
       </div>
     </div>
-    <div class="out-scroll">
+    <div class="out-scroll" id="viewport">
       <div class="canvas" id="canvas">
         <div class="placeholder">Diagram appears here after you generate it.</div>
+      </div>
+      <div class="zoom-controls" id="zoomControls" hidden>
+        <button id="zoomOut" title="Zoom out" aria-label="Zoom out">−</button>
+        <span id="zoomLabel">100%</span>
+        <button id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
+        <button id="zoomFit" title="Fit to screen" aria-label="Fit to screen">⤢</button>
       </div>
     </div>
     <div class="src-panel">
@@ -508,7 +534,7 @@ function initMermaid(mode){
   mermaid.initialize({
     startOnLoad:false, securityLevel:'loose', theme:'base',
     themeVariables: MERMAID_THEME[mode],
-    er:{ useMaxWidth:true, entityPadding:14 },
+    er:{ useMaxWidth:false, entityPadding:14 },
   });
 }
 
@@ -533,6 +559,48 @@ function applyTheme(mode, rerender=true){
 const $ = id => document.getElementById(id);
 let renderCount = 0, lastSvg = '', lastMermaid = '';
 
+/* ---- pan / zoom viewport ---- */
+let viewSvg = null, natW = 0, natH = 0;
+let scale = 1, tx = 0, ty = 0;
+const MIN_SCALE = 0.1, MAX_SCALE = 8;
+const clamp = (v,a,b)=>Math.max(a, Math.min(b, v));
+
+function applyTransform(){
+  if(!viewSvg) return;
+  viewSvg.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`;
+  $('zoomLabel').textContent = Math.round(scale*100) + '%';
+}
+// zoom toward point (cx,cy) — coords relative to the viewport
+function zoomTo(newScale, cx, cy, base){
+  newScale = clamp(newScale, MIN_SCALE, MAX_SCALE);
+  tx = cx - (cx - base.tx) * (newScale / base.scale);
+  ty = cy - (cy - base.ty) * (newScale / base.scale);
+  scale = newScale;
+  applyTransform();
+}
+function fitView(){
+  if(!viewSvg) return;
+  const vp = $('viewport').getBoundingClientRect();
+  const pad = 48;
+  const s = Math.min((vp.width - pad)/natW, (vp.height - pad)/natH, 1);
+  scale = (s > 0 && isFinite(s)) ? s : 1;
+  tx = (vp.width  - natW*scale)/2;
+  ty = (vp.height - natH*scale)/2;
+  applyTransform();
+}
+function setupView(el){
+  viewSvg = el;
+  const vb = el.viewBox && el.viewBox.baseVal;
+  natW = (vb && vb.width)  ? vb.width  : el.getBoundingClientRect().width;
+  natH = (vb && vb.height) ? vb.height : el.getBoundingClientRect().height;
+  el.setAttribute('width',  natW);
+  el.setAttribute('height', natH);
+  el.style.maxWidth = 'none';
+  $('zoomControls').hidden = false;
+  fitView();
+}
+function hideZoom(){ viewSvg = null; $('zoomControls').hidden = true; }
+
 async function generate(){
   const sql = $('sql').value;
   const tables = parseSQL(sql);
@@ -542,6 +610,7 @@ async function generate(){
     setStatus({ err:'No CREATE TABLE statements found. Check your SQL.' });
     $('canvas').innerHTML = '<div class="placeholder">Nothing to draw yet.</div>';
     $('copyMermaid').disabled = $('exportSvg').disabled = true;
+    hideZoom();
     lastMermaid = '';
     return;
   }
@@ -554,9 +623,11 @@ async function generate(){
     const { svg } = await mermaid.render('er_'+(++renderCount), code);
     $('canvas').innerHTML = svg;
     lastSvg = svg;
+    setupView($('canvas').querySelector('svg'));
     $('copyMermaid').disabled = $('exportSvg').disabled = false;
     setStatus({ tables:tables.length, rels:rels.length, warnings });
   }catch(e){
+    hideZoom();
     $('canvas').innerHTML = '<div class="placeholder">Render error — see Mermaid source below.</div>';
     setStatus({ err:'Mermaid could not render this schema. '+(e && e.message ? e.message : '') });
     $('srcBody').classList.add('open'); $('srcToggle').textContent='hide ▴';
@@ -755,6 +826,73 @@ $('themeToggle').addEventListener('click', ()=>{
   persistTheme(next);
   applyTheme(next);
 });
+
+/* ---- zoom controls + wheel + drag/pinch pan ---- */
+const viewport = $('viewport');
+const vpPoint = e => { const r = viewport.getBoundingClientRect(); return { x:e.clientX-r.left, y:e.clientY-r.top }; };
+
+// buttons zoom about the viewport centre
+function buttonZoom(factor){
+  if(!viewSvg) return;
+  const r = viewport.getBoundingClientRect();
+  zoomTo(scale*factor, r.width/2, r.height/2, {scale, tx, ty});
+}
+$('zoomIn').addEventListener('click', ()=>buttonZoom(1.25));
+$('zoomOut').addEventListener('click', ()=>buttonZoom(1/1.25));
+$('zoomFit').addEventListener('click', fitView);
+
+// wheel zoom toward cursor
+viewport.addEventListener('wheel', e=>{
+  if(!viewSvg) return;
+  e.preventDefault();
+  const p = vpPoint(e);
+  const factor = e.deltaY < 0 ? 1.12 : 1/1.12;
+  zoomTo(scale*factor, p.x, p.y, {scale, tx, ty});
+}, {passive:false});
+
+// pointer pan (1 finger / mouse) + pinch zoom (2 fingers)
+const pointers = new Map();
+let panStart = null, pinchStart = null;
+
+viewport.addEventListener('pointerdown', e=>{
+  if(!viewSvg || e.target.closest('.zoom-controls')) return;
+  viewport.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  if(pointers.size === 1){ panStart = {x:e.clientX, y:e.clientY, tx, ty}; viewport.classList.add('grabbing'); }
+  else if(pointers.size === 2){ pinchStart = pinchInfo(); panStart = null; }
+});
+viewport.addEventListener('pointermove', e=>{
+  if(!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  if(pointers.size === 1 && panStart){
+    tx = panStart.tx + (e.clientX - panStart.x);
+    ty = panStart.ty + (e.clientY - panStart.y);
+    applyTransform();
+  } else if(pointers.size === 2 && pinchStart){
+    const now = pinchInfo();
+    const r = viewport.getBoundingClientRect();
+    zoomTo(pinchStart.scale * (now.dist / pinchStart.dist), now.midX - r.left, now.midY - r.top, pinchStart);
+  }
+});
+function endPointer(e){
+  pointers.delete(e.pointerId);
+  if(pointers.size < 2) pinchStart = null;
+  if(pointers.size === 0){ panStart = null; viewport.classList.remove('grabbing'); }
+  else { const p = [...pointers.values()][0]; panStart = {x:p.x, y:p.y, tx, ty}; }
+}
+viewport.addEventListener('pointerup', endPointer);
+viewport.addEventListener('pointercancel', endPointer);
+
+function pinchInfo(){
+  const [a, b] = [...pointers.values()];
+  return {
+    dist: Math.hypot(a.x-b.x, a.y-b.y),
+    midX: (a.x+b.x)/2, midY: (a.y+b.y)/2,
+    scale, tx, ty,
+  };
+}
+// keep the diagram centred on window resize when it would otherwise drift off-screen
+window.addEventListener('resize', ()=>{ if(viewSvg) applyTransform(); });
 
 /* boot: choose theme (saved > system > light), then draw */
 const initialTheme = storedTheme() || 'dark';   // dark is the default theme
