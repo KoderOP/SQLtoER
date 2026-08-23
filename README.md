@@ -8,7 +8,6 @@ Paste a SQL script — CREATE TABLE statements plus ALTER TABLE ... ADD FOREIGN 
 
 Features:
 DDL parsing — reads standard CREATE TABLE definitions and ALTER TABLE ... ADD FOREIGN KEY statements to infer entities and relationships
-Multi-dialect support — works with MySQL, PostgreSQL, and generic SQL syntax
 Automatic cardinality detection — labels relationships as 1:1, 1:N, or M:N based on key constraints
 Instant diagram generation — click Generate diagram and the ER diagram renders immediately
 Mermaid-powered output — view and copy the underlying Mermaid source for the generated diagram
