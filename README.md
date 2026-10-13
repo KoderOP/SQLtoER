@@ -1,7 +1,7 @@
 SQLtoER — Schema → ER
 Turn raw SQL DDL into an Entity-Relationship diagram, instantly, in your browser.
 
-Live demo: koderop.github.io/SQLtoER
+#Live demo: koderop.github.io/SQLtoER
 
 What it does?
 Paste a SQL script — CREATE TABLE statements plus ALTER TABLE ... ADD FOREIGN KEY clauses — and SQLtoER parses it and renders a clean ER diagram, complete with relationship cardinality (1:1, 1:N, M:N) between entities. No backend, no sign-up, no install, runs completely on browser.
